@@ -38,3 +38,7 @@ coverage/
 # Temporary files
 *.tmp
 *.temp
+
+# Local Mastra SQLite runtime files
+backend/mastra.db-shm
+backend/mastra.db-wal

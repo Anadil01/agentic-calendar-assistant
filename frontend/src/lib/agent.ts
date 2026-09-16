@@ -1,11 +1,24 @@
 import { apiFetch } from "@/lib/api";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL =
+  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type AgentStreamEvent = {
-  type: "started" | "progress" | "token" | "completed" | "error";
+  type:
+    | "started"
+    | "progress"
+    | "token"
+    | "approval_required"
+    | "completed"
+    | "error";
   message?: string;
   token?: string;
+  approval?: {
+    actionId: string;
+    actionType: string;
+    eventId: string;
+    expiresAt: string;
+  };
 };
 
 export type ThreadSummary = {
@@ -21,39 +34,85 @@ export type ThreadMessage = {
 };
 
 export async function listThreads(token: string) {
-  return apiFetch<{ threads: ThreadSummary[] }>("/api/agent/threads", {
+  return apiFetch<{ threads: ThreadSummary[] }>(
+    "/api/agent/threads",
+    {
+      token,
+    },
+  );
+}
+
+export async function loadThread(
+  token: string,
+  threadId: string,
+) {
+  return apiFetch<{
+    threadId: string;
+    messages: ThreadMessage[];
+  }>(`/api/agent/threads/${threadId}`, {
     token,
   });
 }
 
-export async function loadThread(token: string, threadId: string) {
-  return apiFetch<{ threadId: string; messages: ThreadMessage[] }>(
-    `/api/agent/threads/${threadId}`,
-    { token },
-  );
+export async function confirmPendingAction(
+  token: string,
+  actionId: string,
+) {
+  return apiFetch<{
+    success: boolean;
+    actionId: string;
+    actionType: string;
+    result: {
+      cancelled: boolean;
+      eventId: string;
+    };
+  }>(`/api/agent/approvals/${actionId}/confirm`, {
+    method: "POST",
+    token,
+  });
+}
+
+export async function rejectPendingAction(
+  token: string,
+  actionId: string,
+) {
+  return apiFetch<{
+    success: boolean;
+    actionId: string;
+    actionType: string;
+    rejected: boolean;
+  }>(`/api/agent/approvals/${actionId}/reject`, {
+    method: "POST",
+    token,
+  });
 }
 
 export async function streamAgentChat(
   token: string,
-  input: { message: string; threadId: string },
+  input: {
+    message: string;
+    threadId: string;
+  },
   onEvent: (event: AgentStreamEvent) => void,
 ) {
-  const res = await fetch(`${API_URL}/api/agent/chat`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
+  const res = await fetch(
+    `${API_URL}/api/agent/chat`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(input),
     },
-    body: JSON.stringify(input),
-  });
+  );
 
   if (!res.ok || !res.body) {
     throw new Error("Agent request failed");
   }
 
   const reader = res.body.getReader();
-
   const decoder = new TextDecoder();
 
   let buffer = "";
@@ -61,22 +120,32 @@ export async function streamAgentChat(
   while (true) {
     const { value, done } = await reader.read();
 
-    buffer += decoder.decode(value, { stream: !done });
+    buffer += decoder.decode(value, {
+      stream: !done,
+    });
 
-    // sse events ->
     const blocks = buffer.split(/\n\n/);
+
     buffer = blocks.pop() ?? "";
 
     for (const block of blocks) {
       for (const line of block.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        // strip the data: prefix
+        if (!line.startsWith("data:")) {
+          continue;
+        }
+
         const data = line.slice(5).trim();
 
-        if (data) onEvent(JSON.parse(data) as AgentStreamEvent);
+        if (data) {
+          onEvent(
+            JSON.parse(data) as AgentStreamEvent,
+          );
+        }
       }
     }
 
-    if (done) break;
+    if (done) {
+      break;
+    }
   }
 }

@@ -6,6 +6,11 @@ import {
   listUserThreads,
   streamAgentReply,
 } from "../services/agent.service.js";
+import {
+  confirmPendingAction,
+  rejectPendingAction,
+} from "../services/approval.service.js";
+
 
 export const agentRoutes = Router();
 
@@ -20,7 +25,7 @@ agentRoutes.use(requireSession);
 
 agentRoutes.get("/threads", async (req, res) => {
   try {
-    const threads = await listUserThreads(req.auth!.authUserId);
+    const threads = await listUserThreads(req.appAuth!.authUserId);
     res.json({ threads });
   } catch (error) {
     const message =
@@ -37,12 +42,76 @@ agentRoutes.get("/threads/:threadId", async (req, res) => {
     return;
   }
   try {
-    const messages = await getThreadMessages(req.auth!.authUserId, parsed.data);
+    const messages = await getThreadMessages(req.appAuth!.authUserId, parsed.data);
     res.json({ threadId: parsed.data, messages });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "failed to list threads";
     res.status(500).json({ error: message });
+  }
+});
+
+agentRoutes.post("/approvals/:actionId/confirm", async (req, res) => {
+  const parsed = z.uuid().safeParse(req.params.actionId);
+
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Invalid actionId",
+    });
+    return;
+  }
+
+  try {
+    const result = await confirmPendingAction({
+      authUserId: req.appAuth!.authUserId,
+      actionId: parsed.data,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to confirm action";
+
+    res.status(400).json({
+      success: false,
+      error: message,
+    });
+  }
+});
+
+agentRoutes.post("/approvals/:actionId/reject", async (req, res) => {
+  const parsed = z.uuid().safeParse(req.params.actionId);
+
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid actionId" });
+    return;
+  }
+
+  try {
+    const result = await rejectPendingAction({
+      authUserId: req.appAuth!.authUserId,
+      actionId: parsed.data,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Failed to reject action";
+
+    res.status(400).json({
+      success: false,
+      error: message,
+    });
   }
 });
 
@@ -65,8 +134,8 @@ agentRoutes.post("/chat", async (req, res) => {
 
   try {
     await streamAgentReply({
-      userId: req.auth!.userId,
-      authUserId: req.auth!.authUserId,
+      userId: req.appAuth!.userId,
+      authUserId: req.appAuth!.authUserId,
       threadId: parsed.data.threadId,
       message: parsed.data.message,
       onEvent: write,

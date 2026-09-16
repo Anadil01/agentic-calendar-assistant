@@ -4,9 +4,21 @@ import { getAgentInstructions } from "../config/agent-instructions.js";
 import { createCalendarTools } from "./agent-tools.service.js";
 
 export type AgentEvent = {
-  type: "started" | "progress" | "token" | "completed" | "error";
+  type:
+    | "started"
+    | "progress"
+    | "token"
+    | "approval_required"
+    | "completed"
+    | "error";
   message?: string;
   token?: string;
+  approval?: {
+    actionId: string;
+    actionType: string;
+    eventId: string;
+    expiresAt: string;
+  };
 };
 
 export type StreamAgentReplyInput = {
@@ -30,25 +42,43 @@ export type ThreadMessage = {
 };
 
 function modelName() {
-  return `openai/${process.env.AI_MODEL ?? "gpt-4o-mini"}`;
+  return `google/${process.env.AI_MODEL ?? "gemini-3.6-flash"}`;
 }
 
 function messageText(content: unknown): string {
-  if (typeof content === "string") return content.trim();
-  if (!content || typeof content !== "object") return "";
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (!content || typeof content !== "object") {
+    return "";
+  }
 
   const record = content as {
     content?: unknown;
-    parts?: Array<{ type?: string; text?: string }>;
+    parts?: Array<{
+      type?: string;
+      text?: string;
+    }>;
   };
 
-  if (typeof record.content === "string" && record.content.trim()) {
+  if (
+    typeof record.content === "string" &&
+    record.content.trim()
+  ) {
     return record.content.trim();
   }
 
-  if (!Array.isArray(record.parts)) return "";
+  if (!Array.isArray(record.parts)) {
+    return "";
+  }
+
   return record.parts
-    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .filter(
+      (part) =>
+        part.type === "text" &&
+        typeof part.text === "string",
+    )
     .map((part) => part.text!.trim())
     .filter(Boolean)
     .join("\n")
@@ -61,9 +91,14 @@ export async function listUserThreads(
   const memory = createAgentMemory();
 
   const result = await memory.listThreads({
-    filter: { resourceId: authUserId },
+    filter: {
+      resourceId: authUserId,
+    },
     perPage: 30,
-    orderBy: { field: "updatedAt", direction: "DESC" },
+    orderBy: {
+      field: "updatedAt",
+      direction: "DESC",
+    },
   });
 
   return result.threads.map((thread) => ({
@@ -107,7 +142,8 @@ export async function getThreadMessages(
     }
 
     const role: ThreadMessage["role"] =
-      message.role === "user" || message.role === "assistant"
+      message.role === "user" ||
+      message.role === "assistant"
         ? message.role
         : "system";
 
@@ -121,9 +157,13 @@ export async function getThreadMessages(
   return messages;
 }
 
-export async function streamAgentReply(input: StreamAgentReplyInput) {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set env");
+export async function streamAgentReply(
+  input: StreamAgentReplyInput,
+) {
+  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    throw new Error(
+      "GOOGLE_GENERATIVE_AI_API_KEY is not set in env",
+    );
   }
 
   input.onEvent({
@@ -150,6 +190,9 @@ export async function streamAgentReply(input: StreamAgentReplyInput) {
   });
 
   for await (const chunk of result.fullStream) {
+    /*
+     * Tool call started
+     */
     if (chunk.type === "tool-call") {
       input.onEvent({
         type: "progress",
@@ -159,6 +202,60 @@ export async function streamAgentReply(input: StreamAgentReplyInput) {
       continue;
     }
 
+    /*
+     * Tool execution finished
+     */
+    if (chunk.type === "tool-result") {
+      const toolResult = chunk.payload.result;
+
+      /*
+       * cancelMeeting does not cancel immediately anymore.
+       *
+       * It creates a pending action and returns:
+       * {
+       *   approvalRequired: true,
+       *   actionId,
+       *   actionType,
+       *   eventId,
+       *   expiresAt
+       * }
+       */
+      if (
+        chunk.payload.toolName === "cancelMeeting" &&
+        toolResult &&
+        typeof toolResult === "object" &&
+        "approvalRequired" in toolResult &&
+        toolResult.approvalRequired === true
+      ) {
+        const approvalResult = toolResult as {
+          approvalRequired: true;
+          actionId: string;
+          actionType: string;
+          eventId: string;
+          expiresAt: string;
+          message?: string;
+        };
+
+        input.onEvent({
+          type: "approval_required",
+          message:
+            approvalResult.message ??
+            "This action requires your confirmation.",
+          approval: {
+            actionId: approvalResult.actionId,
+            actionType: approvalResult.actionType,
+            eventId: approvalResult.eventId,
+            expiresAt: approvalResult.expiresAt,
+          },
+        });
+      }
+
+      continue;
+    }
+
+    /*
+     * Normal assistant text streaming
+     */
     if (chunk.type === "text-delta") {
       const text = chunk.payload.text;
 
@@ -171,8 +268,9 @@ export async function streamAgentReply(input: StreamAgentReplyInput) {
     }
   }
 
-  // streaming finsihes
-
+  /*
+   * Streaming finished
+   */
   const thread = await memory.getThreadById({
     threadId: input.threadId,
     resourceId: input.authUserId,
